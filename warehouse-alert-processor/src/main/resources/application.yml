@@ -1,0 +1,111 @@
+spring:
+  application:
+    name: warehouse-alert-processor
+
+  # ── DataSource / PostgreSQL ─────────────────────────────────────────────────
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:warehouse}
+    username: ${POSTGRES_USER:warehouse}
+    password: ${POSTGRES_PASSWORD:warehouse_pass}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+      idle-timeout: 600000
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          batch_size: 25
+        order_inserts: true
+        order_updates: true
+
+  # ── Kafka ───────────────────────────────────────────────────────────────────
+  kafka:
+    # Use localhost:9092 for local dev (host → Docker port mapping)
+    # Override to kafka:29092 when running inside Docker
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+    consumer:
+      group-id: warehouse-alert-processor
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.warehouse.alertprocessor.model"
+        spring.json.type.mapping: "warehouseErrorEvent:com.warehouse.alertprocessor.model.WarehouseErrorEvent"
+        isolation.level: read_committed
+        max.poll.records: 50
+        fetch.min.bytes: 1
+        fetch.max.wait.ms: 500
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 3
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 1
+
+    listener:
+      ack-mode: MANUAL_IMMEDIATE
+      concurrency: 3
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      lettuce:
+        pool:
+          max-active: 8
+          min-idle: 2
+
+# ── Kafka topics ────────────────────────────────────────────────────────────────
+warehouse:
+  kafka:
+    topics:
+      errors: warehouse.errors
+      dlq: warehouse.errors.dlq
+      processed: warehouse.alerts.processed
+  alert:
+    dedup-ttl-seconds: 60
+    rate-limit-per-minute: 10
+
+# ── Actuator / Metrics ──────────────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health,info,prometheus,metrics,loggers"
+  endpoint:
+    health:
+      show-details: always
+    prometheus:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        alerts.processing.latency: true
+      slo:
+        alerts.processing.latency: 10ms,25ms,45ms,100ms,250ms
+
+server:
+  port: ${SERVER_PORT:8082}
+
+logging:
+  level:
+    com.warehouse: DEBUG
+    org.springframework.kafka: INFO
+    org.springframework.retry: DEBUG
