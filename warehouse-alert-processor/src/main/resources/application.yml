@@ -59,6 +59,10 @@ spring:
     listener:
       ack-mode: MANUAL_IMMEDIATE
       concurrency: 3
+      # Enables Micrometer observations on the listener container so
+      # kafka.consumer.* metrics (including records-lag-max) are bound
+      # to the Micrometer registry and visible at /actuator/prometheus
+      observation-enabled: true
 
   # ── Redis ───────────────────────────────────────────────────────────────────
   data:

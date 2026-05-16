@@ -3,6 +3,7 @@ package com.warehouse.alertprocessor.config;
 import com.warehouse.alertprocessor.model.WarehouseErrorEvent;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -10,14 +11,20 @@ import org.springframework.kafka.annotation.EnableKafka;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
+import org.springframework.kafka.core.DefaultKafkaProducerFactory;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
+import org.springframework.kafka.support.serializer.JsonSerializer;
 
 import java.util.Map;
 
 @Configuration
 @EnableKafka
 public class KafkaConfig {
+
+    // ── Consumer ─────────────────────────────────────────────────────────────
 
     /**
      * Consumer factory typed to WarehouseErrorEvent.
@@ -39,7 +46,7 @@ public class KafkaConfig {
 
     /**
      * Container factory — MANUAL_IMMEDIATE ack so we only commit after
-     * successful processing (or explicit nack for retry/DLQ in Step 7).
+     * successful processing (or explicit nack after retry exhaustion in Step 7).
      */
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, WarehouseErrorEvent> kafkaListenerContainerFactory(
@@ -51,5 +58,23 @@ public class KafkaConfig {
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
         factory.setConcurrency(3);
         return factory;
+    }
+
+    // ── Producer (DLQ) ───────────────────────────────────────────────────────
+
+    @Bean
+    public ProducerFactory<String, WarehouseErrorEvent> producerFactory(KafkaProperties kafkaProperties) {
+        Map<String, Object> props = kafkaProperties.buildProducerProperties(null);
+        props.put(org.apache.kafka.clients.producer.ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
+                StringSerializer.class);
+        props.put(org.apache.kafka.clients.producer.ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
+                JsonSerializer.class);
+        return new DefaultKafkaProducerFactory<>(props);
+    }
+
+    @Bean
+    public KafkaTemplate<String, WarehouseErrorEvent> kafkaTemplate(
+            ProducerFactory<String, WarehouseErrorEvent> producerFactory) {
+        return new KafkaTemplate<>(producerFactory);
     }
 }

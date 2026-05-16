@@ -1,0 +1,58 @@
+spring:
+  application:
+    name: warehouse-dashboard
+
+  # ── PostgreSQL (read-only — never touches schema) ────────────────────────────
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:warehouse}
+    username: ${POSTGRES_USER:warehouse}
+    password: ${POSTGRES_PASSWORD:warehouse_pass}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 1
+      read-only: true
+
+  jpa:
+    hibernate:
+      ddl-auto: none       # dashboard NEVER modifies the schema
+    show-sql: false
+    open-in-view: false
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+  # ── Thymeleaf ───────────────────────────────────────────────────────────────
+  thymeleaf:
+    cache: false           # disable during dev; set to true in production
+
+# ── Kafka (AdminClient only — no consumers in this service) ──────────────────
+warehouse:
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer-group: warehouse-alert-processor
+    topics:
+      errors: warehouse.errors
+
+# ── Actuator ─────────────────────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health,info,prometheus"
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+server:
+  port: ${SERVER_PORT:8083}
+
+logging:
+  level:
+    com.warehouse: DEBUG
