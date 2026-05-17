@@ -47,16 +47,18 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
-        <!-- ── Bucket4j (Redis-backed distributed rate limiting, JDK17+) ──── -->
         <dependency>
             <groupId>com.bucket4j</groupId>
             <artifactId>bucket4j_jdk17-core</artifactId>
-            <version>${bucket4j.version}</version>
+            <version>8.18.0</version>
+            <scope>compile</scope>
         </dependency>
+        <!-- Source: https://mvnrepository.com/artifact/com.bucket4j/bucket4j_jdk17-lettuce -->
         <dependency>
             <groupId>com.bucket4j</groupId>
             <artifactId>bucket4j_jdk17-lettuce</artifactId>
-            <version>${bucket4j.version}</version>
+            <version>8.18.0</version>
+            <scope>compile</scope>
         </dependency>
 
         <!-- ── Spring Retry + AOP ──────────────────────────────────────────── -->
