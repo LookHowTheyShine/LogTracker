@@ -79,7 +79,7 @@ warehouse:
       dlq: warehouse.errors.dlq
       processed: warehouse.alerts.processed
   alert:
-    dedup-ttl-seconds: 60
+    dedup-ttl-seconds: 10
     rate-limit-per-minute: 10
 
 # ── Actuator / Metrics ──────────────────────────────────────────────────────────

@@ -24,8 +24,8 @@ import { Rate, Trend, Counter } from 'k6/metrics';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8081';
 
-const DEVICES = Array.from({ length: 100 }, (_, i) =>
-    `WH-RACK-${String(i + 1).padStart(3, '0')}`);
+const DEVICES = Array.from({ length: 1000 }, (_, i) =>
+    `WH-RACK-${String(i + 1).padStart(4, '0')}`);
 
 const ZONES       = ['ZONE-A', 'ZONE-B', 'ZONE-C', 'ZONE-D', 'ZONE-E'];
 const ERROR_CODES = [
@@ -46,6 +46,7 @@ const published    = new Counter('warehouse_events_published');
 // ── Scenario ──────────────────────────────────────────────────────────────────
 
 export const options = {
+    summaryTrendStats: ['med', 'p(95)', 'p(99)'],
     scenarios: {
         peak_throughput: {
             executor:        'ramping-arrival-rate',
@@ -115,7 +116,7 @@ export function handleSummary(data) {
     console.log(`║  Error rate   : ${String(fmt('warehouse_error_rate', 'rate') + '%').padEnd(36)}║`);
     console.log('╠══════════════════════════════════════════════════════╣');
     console.log(`║  HTTP latency (ms)                                    ║`);
-    console.log(`║    p50  : ${String(fmt('http_req_duration', 'p(50)')).padEnd(43)}║`);
+    console.log(`║    p50  : ${String(fmt('http_req_duration', 'med')).padEnd(43)}║`);
     console.log(`║    p95  : ${String(fmt('http_req_duration', 'p(95)')).padEnd(43)}║`);
     console.log(`║    p99  : ${String(fmt('http_req_duration', 'p(99)')).padEnd(43)}║`);
     console.log('╠══════════════════════════════════════════════════════╣');
