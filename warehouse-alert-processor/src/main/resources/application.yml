@@ -38,10 +38,7 @@ spring:
       auto-offset-reset: earliest
       enable-auto-commit: false
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       properties:
-        spring.json.trusted.packages: "com.warehouse.alertprocessor.model"
-        spring.json.type.mapping: "warehouseErrorEvent:com.warehouse.alertprocessor.model.WarehouseErrorEvent"
         isolation.level: read_committed
         max.poll.records: 50
         fetch.min.bytes: 1
