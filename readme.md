@@ -240,3 +240,174 @@ Your MetricOrg project is a good Kafka use case because:
 - Replay would let you reprocess historical alerts with new business rules
 
 If this were just "worker pool that processes jobs", RabbitMQ would've been simpler.
+
+
+
+Now for the deep dives.
+
+  ---
+Architecture
+
+┌─────────────────────────────────────────────────────────────────┐
+│                      warehouse-producer :8081                    │
+│                                                                 │
+│  POST /api/events                                               │
+│  ──────────────                                                 │
+│  EventController  ──(@Valid)──►  EventProducerService           │
+│                                   enrich()  →  uuid + timestamp │
+│                                   KafkaTemplate.send()          │
+│                                     key = deviceId              │
+│                                     async → 202 immediately     │
+└───────────────────────────┬─────────────────────────────────────┘
+│ warehouse.errors (6 partitions)
+│ deviceId key → same device always
+│ same partition → ordering guaranteed
+▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  warehouse-alert-processor :8082                 │
+│                                                                 │
+│  WarehouseErrorEventConsumer                                    │
+│    @KafkaListener  MANUAL_IMMEDIATE ack  concurrency=3          │
+│    │                                                            │
+│    ▼                                                            │
+│  AlertProcessorService (no AOP annotations — pure orchestrator) │
+│    │                                                            │
+│    ├─► DeduplicationService                                     │
+│    │     Redis SET NX  key=warehouse:dedup:{deviceId}:{errCode} │
+│    │     TTL=60s  →  atomic, no race between 3 consumer threads │
+│    │     duplicate? → DEDUPED metric → return (consumer acks)   │
+│    │                                                            │
+│    ├─► RateLimitingService                                      │
+│    │     Bucket4j token bucket in Redis                         │
+│    │     key=warehouse:ratelimit:{deviceId}                     │
+│    │     10 tokens/min per device  →  bucket.tryConsume(1)      │
+│    │     no token? → RATE_LIMITED metric → return (acks)        │
+│    │                                                            │
+│    └─► RetryablePersistService  (@Retryable)                    │
+│          └─► AlertPersistenceService  (@Transactional)          │
+│                persist Alert + resolveIncident → PostgreSQL      │
+│                success → SAVED metric                            │
+│                3 failures → @Recover → DlqProducerService        │
+│                                                                 │
+│  DlqConsumer                                                    │
+│    @KafkaListener  warehouse.errors.dlq  concurrency=2          │
+│    → persist as FAILED → ack                                    │
+└───────────────────────────┬─────────────────────────────────────┘
+│ reads same alerts/incidents tables
+▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   warehouse-dashboard :8083                      │
+│                                                                 │
+│  AlertView + IncidentView  (@Immutable JPA,  hikari read-only)  │
+│  RedisStatsService  →  reads warehouse:stats:*                  │
+│  ConsumerLagService →  AdminClient offset query, 5s cache       │
+│  AlertStatsService  →  aggregates all three sources             │
+│  DashboardController  GET / (Thymeleaf)  GET /api/stats (JSON)  │
+│  dashboard.html auto-refreshes every 5s via JS fetch            │
+└─────────────────────────────────────────────────────────────────┘
+
+  ---
+Kafka Nuances in This Project
+
+Why 6 partitions for warehouse.errors?
+Partitions = maximum parallelism. With concurrency=3, three consumer threads run. Six partitions means each thread owns two partitions. You could scale to
+6 threads later without changing the topic. More than 6 consumer threads would leave some idle (no partition to own).
+
+Why deviceId as the message key?
+Kafka routes messages with the same key to the same partition. All events from WH-RACK-001 always land on partition 2 (for example). That means one
+consumer thread owns all events for that device, so you get natural per-device ordering without needing distributed locks.
+
+Why MANUAL_IMMEDIATE ack mode?
+In RabbitMQ terms: manual ack. The consumer only commits the Kafka offset after ack.acknowledge() is called — which only happens after process() succeeds.
+If processing throws, the method exits without acking, and Kafka will redeliver that message to the same consumer (or another one after rebalance). This
+is equivalent to a rejected message going back to the queue in Rabbit.
+
+MANUAL_IMMEDIATE specifically means the ack is sent to the broker immediately when ack.acknowledge() is called, rather than batched. Important for
+low-latency offset commits.
+
+Why DLQ has only 2 partitions?
+DLQ traffic is a small fraction of normal traffic (only events that fail 3 DB retries). Two partitions is enough. DlqConsumer sets concurrency=2 to match
+exactly.
+
+setUseTypeHeaders(false) — when warehouse-producer serializes a WarehouseErrorEvent to JSON, Spring Kafka by default adds a __TypeId__ header with the
+class name. But k6 sends raw JSON with no headers. Without this flag, the consumer's JsonDeserializer looks for the __TypeId__ header, can't find it, and
+throws a type-resolution error. Setting false makes it use the declared type parameter (WarehouseErrorEvent.class) instead of the header.
+
+  ---
+Redis Nuances
+
+Two separate Redis connections
+
+┌──────────────────────────────────────────────┬─────────────────────────────────────┬──────────────────────────────────┬────────────────────────────┐
+│                  Connection                  │               Used by               │           Key pattern            │         Value type         │
+├──────────────────────────────────────────────┼─────────────────────────────────────┼──────────────────────────────────┼────────────────────────────┤
+│ StringRedisTemplate (Spring Boot auto)       │ DeduplicationService,               │ warehouse:dedup:*,               │ String                     │
+│                                              │ RedisStatsService                   │ warehouse:stats:*                │                            │
+├──────────────────────────────────────────────┼─────────────────────────────────────┼──────────────────────────────────┼────────────────────────────┤
+│ StatefulRedisConnection<String, byte[]>      │ RateLimitingService via Bucket4j    │ warehouse:ratelimit:*            │ byte[] (Bucket4j binary    │
+│ (manual)                                     │                                     │                                  │ format)                    │
+└──────────────────────────────────────────────┴─────────────────────────────────────┴──────────────────────────────────┴────────────────────────────┘
+
+Bucket4j serializes its token bucket state as binary. It can't share the String-typed connection. RateLimitConfig calls
+connectionFactory.getNativeClient() to grab the already-configured RedisClient (avoiding a second TCP connection pool) then opens a second logical
+connection with the right codec.
+
+Deduplication — SET NX
+SET warehouse:dedup:WH-001:TEMP_THRESHOLD_EXCEEDED 1 EX 60 NX
+NX = only set if Not eXists. Returns null if key already existed (= duplicate). Returns "OK" if it was new. This is atomic at the Redis level — even with
+3 concurrent consumer threads, only one wins the SET and the rest see it as a duplicate. No locks needed.
+
+Rate limiting — token bucket
+Bucket4j stores the entire bucket state (token count + last refill time) as a single binary blob in Redis. tryConsume(1) does a compare-and-swap loop:
+read the blob, check tokens, decrement, write back. If another thread changed it between read and write, it retries. This is why the Lettuce byte[]
+connection is needed — CAS operations on serialized state.
+
+refillGreedy(10, Duration.ofMinutes(1)) means tokens trickle back in continuously (not all at once at :00). At 10 tokens/min that's 1 token every 6
+seconds. So a device that hits the limit has to wait ~6s for the next token.
+
+Fail-open on Redis unavailability
+Both DeduplicationService and RateLimitingService have catch (Exception e) { return false; } — i.e., if Redis is down, events are allowed through instead
+of being blocked. This is a deliberate product decision: better to process a duplicate than to drop real alerts in a warehouse monitoring system.
+
+  ---
+Transactional + Retry Nuances (The AOP Story)
+
+This is the most subtle part. Here's what goes wrong if you put @Retryable and @Transactional on the same method:
+
+Attempt 1: Spring opens TX1 → DB write fails → TX1 rolled back
+Attempt 2: Spring Retry fires BUT it's still inside TX1's proxy
+→ the transaction was already rolled back
+→ any DB work immediately fails with "transaction is not active"
+Attempt 3: Same — rolled back TX, guaranteed failure
+
+Spring AOP uses proxies. When Spring wraps a bean with @Transactional, it creates a proxy that opens/closes a transaction around method calls. When it
+wraps with @Retryable, it creates a proxy that retries on exception. If both wrap the same bean, the retry proxy is outside but the transaction proxy is
+inside — which means retries happen inside the same transaction context.
+
+The fix is three separate beans:
+
+Consumer calls → AlertProcessorService (no AOP)
+└── RetryablePersistService (@Retryable proxy wraps THIS)
+└── AlertPersistenceService (@Transactional proxy wraps THIS)
+
+Attempt 1: Retry proxy calls persist() → TX proxy opens TX1 → DB fail → TX1 closed
+Attempt 2: Retry proxy calls persist() AGAIN → TX proxy opens TX2 (fresh) → ...
+Attempt 3: Same → TX3
+
+Each retry goes through RetryablePersistService → AlertPersistenceService. Because AlertPersistenceService is its own bean with its own @Transactional
+proxy, each call to persist() opens a brand-new transaction. That's the fix.
+
+Why @Recover must not rethrow:
+Normal failure path:
+Kafka delivers message → consumer calls process() → 3 DB retries fail
+→ @Recover fires → sends to DLQ → returns normally
+→ consumer sees no exception → ack.acknowledge() → offset committed
+
+If @Recover rethrew:
+→ exception propagates back to consumer
+→ consumer catches it → does NOT ack
+→ Kafka redelivers the same message
+→ Spring Retry fires again (3 more DB retries + @Recover + rethrow)
+→ Kafka redelivers again → infinite loop
+
+The DLQ is the terminal state. Once it lands there, it's done. @Recover returning normally is what signals "handled" to the Kafka consumer.
